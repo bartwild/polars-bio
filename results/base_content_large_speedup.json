@@ -1,0 +1,1 @@
+{"test_case": "large", "description": "Large FASTQ file (~1GB)", "speedup_results": [{"threads": 1, "time": 1.4927290906667217, "speedup": 1.0}, {"threads": 2, "time": 1.4677458894445106, "speedup": 1.0170214758575589}, {"threads": 4, "time": 1.5474490372224763, "speedup": 0.964638611521597}, {"threads": 8, "time": 1.7051328746666614, "speedup": 0.8754327084090365}]}

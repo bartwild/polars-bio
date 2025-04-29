@@ -1,0 +1,1 @@
+{"test_case": "large", "description": "Large FASTQ file (~1GB)", "threads": 4, "results": [{"name": "polars_bio_base_content_4_threads", "min": 1.4879141333337127, "max": 1.645204522333491, "mean": 1.5474490372224763, "threads": 4}]}

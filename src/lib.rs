@@ -6,12 +6,16 @@ mod scan;
 mod streaming;
 mod udtf;
 mod utils;
+pub mod qc;
 
 use std::string::ToString;
 use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::ffi_stream::ArrowArrayStreamReader;
 use datafusion::arrow::pyarrow::PyArrowType;
+use datafusion::arrow::array::StringArray;
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion_python::dataframe::PyDataFrame;
 use datafusion_vcf::storage::VcfReader;
@@ -20,6 +24,7 @@ use polars_lazy::prelude::{LazyFrame, ScanArgsAnonymous};
 use polars_python::error::PyPolarsErr;
 use polars_python::lazyframe::PyLazyFrame;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList, PyString};
 use tokio::runtime::Runtime;
 
 use crate::context::PyBioSessionContext;
@@ -403,6 +408,54 @@ fn py_from_polars(
     })
 }
 
+#[pyfunction]
+fn base_content_analysis(
+    py: Python,
+    py_ctx: &PyBioSessionContext,
+    df: PyObject,
+) -> PyResult<PyDataFrame> {
+    // First, extract the sequence data while holding the GIL
+    let sequence_col = df.getattr(py, "select")?
+        .call1(py, (PyString::new_bound(py, "sequence"),))?;
+    
+    // Convert to Arrow RecordBatch
+    let arrow_batch = sequence_col.getattr(py, "to_arrow")?
+        .call0(py)?;
+    
+    // Extract StringArray from RecordBatch
+    let sequence_array = arrow_batch
+        .getattr(py, "column")?
+        .call1(py, (0,))?;
+    
+    // Convert PyArrow array to Rust StringArray
+    let py_list = sequence_array.getattr(py, "to_pylist")?.call0(py)?;
+    let sequence_values: Vec<Option<String>> = py_list.extract(py)?;
+    
+    let string_array = StringArray::from(sequence_values);
+    
+    // Now we can release the GIL for the computation-heavy part
+    py.allow_threads(|| {
+        let rt = Runtime::new().unwrap();
+        
+        // Calculate base content
+        let result_batch = match crate::qc::base_content::calculate_base_content(&string_array) {
+            Ok(batch) => batch,
+            Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Error calculating base content: {}", e))),
+        };
+        
+        // Convert back to PyDataFrame
+        let df = rt.block_on(async {
+            let ctx = &py_ctx.ctx;
+            let mem_table = MemTable::try_new(result_batch.schema(), vec![vec![result_batch]]).unwrap();
+            let table_name = format!("base_content_{}", rand::random::<u32>());
+            ctx.session.register_table(table_name.clone(), Arc::new(mem_table)).unwrap();
+            ctx.session.table(table_name).await.unwrap()
+        });
+        
+        Ok(PyDataFrame::new(df))
+    })
+}
+
 #[pymodule]
 fn polars_bio(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     pyo3_log::init();
@@ -417,6 +470,7 @@ fn polars_bio(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_describe_vcf, m)?)?;
     m.add_function(wrap_pyfunction!(py_register_view, m)?)?;
     m.add_function(wrap_pyfunction!(py_from_polars, m)?)?;
+    m.add_function(wrap_pyfunction!(base_content_analysis, m)?)?;
     // m.add_function(wrap_pyfunction!(unary_operation_scan, m)?)?;
     m.add_class::<PyBioSessionContext>()?;
     m.add_class::<FilterOp>()?;
