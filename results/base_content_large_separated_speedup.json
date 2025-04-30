@@ -1,1 +1,52 @@
-{"test_case": "large", "description": "Large FASTQ file (~1GB)", "io_results": [{"name": "I/O time (8 threads)", "min": 0.6327385902404785, "max": 0.8434042930603027, "mean": 0.7509147855970595, "threads": 8}], "compute_results": [{"name": "Compute time (8 threads)", "min": 0.3817441463470459, "max": 0.4031715393066406, "mean": 0.3886770142449273, "threads": 8}], "total_results": [{"name": "Total time (8 threads)", "min": 1.0164997577667236, "max": 1.2272934913635254, "mean": 1.1395917998419867, "threads": 8}]}
+{
+  "test_case": "large",
+  "description": "Large FASTQ file (~1GB)",
+  "io_results": [
+    {
+      "name": "I/O time (1 threads)",
+      "min": 1.320641040802002,
+      "max": 1.763831377029419,
+      "mean": 1.5105121400621202,
+      "threads": 1
+    },
+    {
+      "name": "I/O time (8 threads)",
+      "min": 1.330345869064331,
+      "max": 1.6778030395507812,
+      "mean": 1.4869543976253934,
+      "threads": 8
+    }
+  ],
+  "compute_results": [
+    {
+      "name": "Compute time (1 threads)",
+      "min": 1.6499958038330078,
+      "max": 1.806466817855835,
+      "mean": 1.7167156802283392,
+      "threads": 1
+    },
+    {
+      "name": "Compute time (8 threads)",
+      "min": 0.7689871788024902,
+      "max": 0.8209555149078369,
+      "mean": 0.7930845949384902,
+      "threads": 8
+    }
+  ],
+  "total_results": [
+    {
+      "name": "Total time (1 threads)",
+      "min": 3.086165189743042,
+      "max": 3.451195001602173,
+      "mean": 3.2272278202904596,
+      "threads": 1
+    },
+    {
+      "name": "Total time (8 threads)",
+      "min": 2.121025323867798,
+      "max": 2.498758554458618,
+      "mean": 2.2800389925638833,
+      "threads": 8
+    }
+  ]
+}

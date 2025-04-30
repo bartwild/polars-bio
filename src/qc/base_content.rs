@@ -3,8 +3,10 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result};
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::thread;
+use rayon::prelude::*; // Import Rayon's parallel iterator traits
+use std::sync::Once;
+
+static THREAD_POOL_INIT: Once = Once::new();
 
 /// Calculates base content percentages for each position in sequences
 pub fn calculate_base_content(sequences: &StringArray) -> Result<RecordBatch> {
@@ -128,38 +130,49 @@ pub fn calculate_base_content_parallel(sequences: &StringArray, num_threads: usi
         return create_empty_result();
     }
 
-    // Use at least 1 thread, but no more than the number of sequences
-    let num_threads = std::cmp::min(std::cmp::max(num_threads, 1), sequences.len());
+    // For very small datasets, just use the single-threaded version
+    if sequences.len() < 1000 || num_threads <= 1 {
+        return calculate_base_content(sequences);
+    }
     
-    // Calculate chunk size for each thread
-    let chunk_size = (sequences.len() + num_threads - 1) / num_threads;
-    
-    // Spawn threads to process chunks in parallel
-    let mut handles = vec![];
-    
-    for thread_id in 0..num_threads {
-        let start = thread_id * chunk_size;
-        let end = std::cmp::min(start + chunk_size, sequences.len());
-        
-        // Skip empty chunks
-        if start >= end {
-            continue;
+    // Set the number of threads for Rayon only if not already initialized
+    let mut thread_pool_error = None;
+    THREAD_POOL_INIT.call_once(|| {
+        if let Err(e) = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global() 
+        {
+            thread_pool_error = Some(DataFusionError::Execution(
+                format!("Failed to set global thread pool: {}", e)
+            ));
         }
-        
-        // Clone sequences for this thread
-        let sequences = sequences.clone();
-        
-        // Spawn thread
-        let handle = thread::spawn(move || {
-            // Create local counters for this thread
+    });
+    
+    // Check if there was an error during initialization
+    if let Some(err) = thread_pool_error {
+        return Err(err);
+    }
+    
+    // Calculate chunk size for better work distribution
+    let chunk_size = std::cmp::max(
+        100, // Minimum chunk size
+        (sequences.len() + num_threads - 1) / num_threads
+    );
+    
+    // Process data in parallel using Rayon
+    let (a_counts, c_counts, g_counts, t_counts, n_counts) = (0..sequences.len())
+        .collect::<Vec<_>>() // Convert range to Vec for parallel processing
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            // Create local counters for this chunk
             let mut local_a_counts = vec![0.0; max_length];
             let mut local_c_counts = vec![0.0; max_length];
             let mut local_g_counts = vec![0.0; max_length];
             let mut local_t_counts = vec![0.0; max_length];
             let mut local_n_counts = vec![0.0; max_length];
             
-            // Process assigned sequences
-            for i in start..end {
+            // Process sequences in this chunk
+            for &i in chunk {
                 if sequences.is_valid(i) {
                     let seq = sequences.value(i);
                     for (pos, base) in seq.chars().enumerate() {
@@ -174,33 +187,22 @@ pub fn calculate_base_content_parallel(sequences: &StringArray, num_threads: usi
                 }
             }
             
-            // Return local counts
             (local_a_counts, local_c_counts, local_g_counts, local_t_counts, local_n_counts)
-        });
-        
-        handles.push(handle);
-    }
-    
-    // Initialize final count arrays
-    let mut a_counts = vec![0.0; max_length];
-    let mut c_counts = vec![0.0; max_length];
-    let mut g_counts = vec![0.0; max_length];
-    let mut t_counts = vec![0.0; max_length];
-    let mut n_counts = vec![0.0; max_length];
-    
-    // Collect and merge results from all threads
-    for handle in handles {
-        let (thread_a_counts, thread_c_counts, thread_g_counts, thread_t_counts, thread_n_counts) = 
-            handle.join().map_err(|_| DataFusionError::Execution("Thread panicked".to_string()))?;
-        
-        for i in 0..max_length {
-            a_counts[i] += thread_a_counts[i];
-            c_counts[i] += thread_c_counts[i];
-            g_counts[i] += thread_g_counts[i];
-            t_counts[i] += thread_t_counts[i];
-            n_counts[i] += thread_n_counts[i];
-        }
-    }
+        })
+        .reduce(
+            || (vec![0.0; max_length], vec![0.0; max_length], vec![0.0; max_length], vec![0.0; max_length], vec![0.0; max_length]),
+            |mut acc, chunk_counts| {
+                let (chunk_a, chunk_c, chunk_g, chunk_t, chunk_n) = chunk_counts;
+                for i in 0..max_length {
+                    acc.0[i] += chunk_a[i];
+                    acc.1[i] += chunk_c[i];
+                    acc.2[i] += chunk_g[i];
+                    acc.3[i] += chunk_t[i];
+                    acc.4[i] += chunk_n[i];
+                }
+                acc
+            }
+        );
 
     // Convert counts to percentages
     let positions: Vec<i32> = (0..max_length as i32).collect();

@@ -1,15 +1,19 @@
 import os
-import timeit
+import time
+import json
 import numpy as np
-import pandas as pd
 import polars as pl
+import polars_bio as pb
 from rich import print
 from rich.box import MARKDOWN
 from rich.table import Table
-import json
-import polars_bio as pb
-import time  # Add this import for the time.time() function
+import subprocess
+import tempfile
+import multiprocessing
+from pathlib import Path
 
+# Ensure results directory exists
+os.makedirs("results", exist_ok=True)
 
 # Set environment variables
 os.environ["POLARS_MAX_THREADS"] = "1"  # For single-threaded tests
@@ -21,7 +25,7 @@ if BENCH_DATA_ROOT is None:
 # Test parameters
 num_repeats = 3
 num_executions = 3
-test_threads = [8]  # For parallel tests
+test_threads = [1, 8]  # For parallel tests
 
 # Test cases - adjust paths as needed
 test_cases = [{
@@ -31,371 +35,199 @@ test_cases = [{
     }
 ]
 
-# Define functions to benchmark
-def polars_bio_base_content(file_path):
-    """Benchmark polars-bio base_content function"""
-    df = pb.read_fastq(file_path)
-    result = pb.qc.base_content(df.collect())
-    return result
-
-
-def set_thread_count(threads):
-    """Helper function to set thread count for both Polars and DataFusion"""
-    # Set the number of threads for DataFusion
-    pb.ctx.set_option("datafusion.execution.target_partitions", str(threads))
+# Function to run a single benchmark in a separate process
+def run_single_benchmark(test_case, threads, repeats, executions):
+    """Run a single benchmark with specified parameters and return results"""
+    result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
+    result_file.close()
     
-    # Also set these options to ensure proper parallelization
-    pb.ctx.set_option("datafusion.optimizer.repartition_joins", "true")
-    pb.ctx.set_option("datafusion.optimizer.repartition_file_scans", "true")
-    pb.ctx.set_option("datafusion.execution.coalesce_batches", "false")
+    # Create a temporary script file
+    script_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py')
+    script_file.write(f"""
+import time
+import polars as pl
+import polars_bio as pb
+import json
+
+# Run the benchmark with {threads} threads
+file_path = "{test_case['file_path']}"
+num_threads = {threads}
+num_repeats = {repeats}
+num_executions = {executions}
+
+io_times = []
+compute_times = []
+total_times = []
+
+for _ in range(num_repeats):
+    for _ in range(num_executions):
+        # Load data
+        start_io = time.time()
+        # Use read_fastq instead of read_csv for FASTQ files
+        df = pb.read_fastq(file_path).collect()
+        io_time = time.time() - start_io
+        
+        # Process data
+        start_compute = time.time()
+        # Extract sequence column for base content analysis
+        sequences_df = df.select("sequence")
+        result = pb.qc.base_content_parallel(sequences_df, num_threads=num_threads)
+        compute_time = time.time() - start_compute
+        
+        total_time = io_time + compute_time
+        
+        io_times.append(io_time)
+        compute_times.append(compute_time)
+        total_times.append(total_time)
+
+# Calculate statistics
+results = {{
+    "threads": num_threads,
+    "io": {{
+        "min": min(io_times),
+        "max": max(io_times),
+        "mean": sum(io_times) / len(io_times)
+    }},
+    "compute": {{
+        "min": min(compute_times),
+        "max": max(compute_times),
+        "mean": sum(compute_times) / len(compute_times)
+    }},
+    "total": {{
+        "min": min(total_times),
+        "max": max(total_times),
+        "mean": sum(total_times) / len(total_times)
+    }}
+}}
+
+# Save results
+with open("{result_file.name}", "w") as f:
+    json.dump(results, f)
+""")
+    script_file.close()
     
-    # Ensure Polars is also using the right number of threads
-    # Use the correct method for your version of Polars
+    # Run the script in a separate process
     try:
-        # For newer versions of Polars
-        pl.Config.set_global_threads(threads)
-    except AttributeError:
-        try:
-            # For older versions of Polars
-            pl.set_global_threads(threads)
-        except AttributeError:
-            # If neither method works, try environment variable
-            os.environ["POLARS_MAX_THREADS"] = str(threads)
-            print(f"Set POLARS_MAX_THREADS environment variable to {threads}")
-
-
-def polars_bio_base_content_parallel(file_path, threads):
-    """Benchmark polars-bio base_content function with parallel execution"""
-    # Set thread options
-    set_thread_count(threads)
-    
-    df = pb.read_fastq(file_path)
-    result = pb.qc.base_content(df.collect())
-    return result
-
-
-def polars_bio_base_content_parallel_separated(file_path, threads):
-    """Benchmark with I/O and computation separated"""
-    # Set thread options
-    set_thread_count(threads)
-    
-    # First, read the file (time this separately)
-    start_io = time.time()
-    df = pb.read_fastq(file_path).collect()
-    io_time = time.time() - start_io
-    
-    # Then, process the data with parallel implementation (time this separately)
-    start_compute = time.time()
-    # Use the parallel version of base_content that will utilize the Rust parallel implementation
-    result = pb.qc.base_content_parallel(df, num_threads=threads)
-    compute_time = time.time() - start_compute
-    
-    total_time = io_time + compute_time
-    
-    print(f"I/O time: {io_time:.6f}s, Compute time: {compute_time:.6f}s, Total: {total_time:.6f}s")
-    
-    return result, io_time, compute_time, total_time
-
-
-# Create results directory
-os.makedirs("results", exist_ok=True)
-
-print("\nRunning parallel benchmarks...")
-for t in []:  # Changed from empty list to test_cases to actually run the benchmarks
-    for threads in test_threads:
-        results = []
+        subprocess.run(["python", script_file.name], check=True)
         
-        print(f"Testing {t['name']} with {threads} threads...")
+        # Read results
+        with open(result_file.name, 'r') as f:
+            results = json.load(f)
+            
+        # Clean up temporary files
+        os.unlink(script_file.name)
+        os.unlink(result_file.name)
         
-        # Benchmark polars-bio base_content with parallel execution
-        try:
-            times = timeit.repeat(
-                lambda: polars_bio_base_content_parallel(t["file_path"], threads),
-                repeat=num_repeats,
-                number=num_executions
-            )
-            
-            per_run_times = [time / num_executions for time in times]
-            results.append({
-                "name": f"polars_bio_base_content_{threads}_threads",
-                "min": min(per_run_times),
-                "max": max(per_run_times),
-                "mean": np.mean(per_run_times),
-                "threads": threads
-            })
-        except Exception as e:
-            print(f"Error benchmarking polars_bio_base_content with {threads} threads: {e}")
-        
-        # Create Rich table
-        table = Table(title=f"Base Content Benchmark Results - {t['name']} ({threads} threads)", box=MARKDOWN)
-        table.add_column("Function", justify="left", style="cyan", no_wrap=True)
-        table.add_column("Min (s)", justify="right", style="green")
-        table.add_column("Max (s)", justify="right", style="green")
-        table.add_column("Mean (s)", justify="right", style="green")
-        table.add_column("Threads", justify="right", style="magenta")
-        
-        # Add rows to the table
-        for result in results:
-            table.add_row(
-                result["name"],
-                f"{result['min']:.6f}",
-                f"{result['max']:.6f}",
-                f"{result['mean']:.6f}",
-                str(result["threads"])
-            )
-        
-        # Display the table
-        print(table)
-        
-        # Save results to JSON
-        benchmark_results = {
-            "test_case": t["name"],
-            "description": t["description"],
-            "threads": threads,
-            "results": results
-        }
-        json.dump(benchmark_results, open(f"results/base_content_{t['name']}_{threads}_threads.json", "w"))
-
-# Compare speedup across different thread counts
-print("\nComparing speedup across thread counts...")
-for t in []:
-    speedup_results = []
-    
-    # Load single-threaded results as baseline
-    try:
-        with open(f"results/base_content_{t['name']}_1_threads.json", "r") as f:  # Changed to use 1_threads file
-            baseline_data = json.load(f)
-            baseline_time = baseline_data["results"][0]["mean"]
-            
-            speedup_results.append({
-                "threads": 1,
-                "time": baseline_time,
-                "speedup": 1.0
-            })
-            
-            # Calculate speedup for each thread count
-            for threads in test_threads[1:]:  # Skip the first one (1 thread)
-                try:
-                    with open(f"results/base_content_{t['name']}_{threads}_threads.json", "r") as f:
-                        thread_data = json.load(f)
-                        thread_time = thread_data["results"][0]["mean"]
-                        speedup = baseline_time / thread_time
-                        
-                        speedup_results.append({
-                            "threads": threads,
-                            "time": thread_time,
-                            "speedup": speedup
-                        })
-                except Exception as e:
-                    print(f"Error loading results for {threads} threads: {e}")
-            
-            # Create Rich table for speedup comparison
-            table = Table(title=f"Speedup Comparison - {t['name']}", box=MARKDOWN)
-            table.add_column("Threads", justify="right", style="cyan")
-            table.add_column("Time (s)", justify="right", style="green")
-            table.add_column("Speedup", justify="right", style="magenta")
-            
-            # Add rows to the table
-            for result in speedup_results:
-                table.add_row(
-                    str(result["threads"]),
-                    f"{result['time']:.6f}",
-                    f"{result['speedup']:.2f}x"
-                )
-            
-            # Display the table
-            print(table)
-            
-            # Save speedup results to JSON
-            json.dump({
-                "test_case": t["name"],
-                "description": t["description"],
-                "speedup_results": speedup_results
-            }, open(f"results/base_content_{t['name']}_speedup.json", "w"))
+        return results
     except Exception as e:
-        print(f"Error calculating speedup for {t['name']}: {e}")
+        print(f"Error running benchmark with {threads} threads: {e}")
+        # Clean up temporary files even if there's an error
+        if os.path.exists(script_file.name):
+            os.unlink(script_file.name)
+        if os.path.exists(result_file.name):
+            os.unlink(result_file.name)
+        return None
 
-# Run parallel benchmarks with separated I/O and computation timing
-print("\nRunning parallel benchmarks with separated timing...")
+# Function to create a formatted table of results
+def create_speedup_table(results, baseline_idx, title, metric):
+    table = Table(title=title, box=MARKDOWN)
+    table.add_column("Threads", justify="right", style="cyan")
+    table.add_column(f"{metric} Time (s)", justify="right", style="green")
+    table.add_column(f"{metric} Speedup", justify="right", style="magenta")
+    
+    baseline = results[baseline_idx]["mean"]
+    for result in results:
+        speedup = baseline / result["mean"] if result["mean"] > 0 else 0
+        table.add_row(
+            str(result["threads"]),
+            f"{result['mean']:.6f}",
+            f"{speedup:.2f}x"
+        )
+    
+    return table
+
+# Main benchmark loop
 for t in test_cases:
-    io_results = []
-    compute_results = []
-    total_results = []
+    print(f"Testing {t['name']}...")
     
-    # Initialize Rayon thread pool only once per test case
-    # This avoids the "global thread pool already initialized" error
-    try:
-        # Reset thread pool to 1 thread first
-        pb.qc.base_content_parallel(pl.DataFrame({"sequence": ["ACGT"]}), num_threads=1)
-    except Exception as e:
-        print(f"Warning: Could not reset thread pool: {e}")
+    # Prepare result structure
+    all_results = {
+        "test_case": t["name"],
+        "description": t["description"],
+        "io_results": [],
+        "compute_results": [],
+        "total_results": []
+    }
     
+    # Run benchmarks for each thread count
+    benchmark_results = []
     for threads in test_threads:
-        print(f"Testing {t['name']} with {threads} threads (separated timing)...")
-        
-        # Benchmark with separated timing
-        try:
-            # We can't use timeit directly since we need to capture the separated times
-            # So we'll run it manually a few times and average the results
-            io_times = []
-            compute_times = []
-            total_times = []
-            
-            for _ in range(num_repeats):
-                for _ in range(num_executions):
-                    _, io_time, compute_time, total_time = polars_bio_base_content_parallel_separated(
-                        t["file_path"], threads
-                    )
-                    io_times.append(io_time)
-                    compute_times.append(compute_time)
-                    total_times.append(total_time)
-            
-            # Calculate statistics
-            io_result = {
-                "name": f"I/O time ({threads} threads)",
-                "min": min(io_times),
-                "max": max(io_times),
-                "mean": np.mean(io_times),
-                "threads": threads
-            }
-            io_results.append(io_result)
-            
-            compute_result = {
-                "name": f"Compute time ({threads} threads)",
-                "min": min(compute_times),
-                "max": max(compute_times),
-                "mean": np.mean(compute_times),
-                "threads": threads
-            }
-            compute_results.append(compute_result)
-            
-            total_result = {
-                "name": f"Total time ({threads} threads)",
-                "min": min(total_times),
-                "max": max(total_times),
-                "mean": np.mean(total_times),
-                "threads": threads
-            }
-            total_results.append(total_result)
-            
-        except Exception as e:
-            print(f"Error benchmarking with separated timing ({threads} threads): {e}")
-        
-        # Create Rich table for the separated timing results
-        table = Table(title=f"Separated Timing Results - {t['name']} ({threads} threads)", box=MARKDOWN)
-        table.add_column("Operation", justify="left", style="cyan", no_wrap=True)
-        table.add_column("Min (s)", justify="right", style="green")
-        table.add_column("Max (s)", justify="right", style="green")
-        table.add_column("Mean (s)", justify="right", style="green")
-        table.add_column("Threads", justify="right", style="magenta")
-        
-        # Add rows to the table
-        if io_results:
-            table.add_row(
-                io_results[-1]["name"],
-                f"{io_results[-1]['min']:.6f}",
-                f"{io_results[-1]['max']:.6f}",
-                f"{io_results[-1]['mean']:.6f}",
-                str(io_results[-1]["threads"])
-            )
-        
-        if compute_results:
-            table.add_row(
-                compute_results[-1]["name"],
-                f"{compute_results[-1]['min']:.6f}",
-                f"{compute_results[-1]['max']:.6f}",
-                f"{compute_results[-1]['mean']:.6f}",
-                str(compute_results[-1]["threads"])
-            )
-        
-        if total_results:
-            table.add_row(
-                total_results[-1]["name"],
-                f"{total_results[-1]['min']:.6f}",
-                f"{total_results[-1]['max']:.6f}",
-                f"{total_results[-1]['mean']:.6f}",
-                str(total_results[-1]["threads"])
-            )
-        
-        # Display the table
-        print(table)
-        
-        # Save results to JSON
-        separated_results = {
-            "test_case": t["name"],
-            "description": t["description"],
-            "threads": threads,
-            "io_results": [io_results[-1]] if io_results else [],
-            "compute_results": [compute_results[-1]] if compute_results else [],
-            "total_results": [total_results[-1]] if total_results else []
-        }
-        json.dump(separated_results, open(f"results/base_content_{t['name']}_{threads}_threads_separated.json", "w"))
+        print(f"Testing {t['name']} with {threads} threads in a separate process...")
+        results = run_single_benchmark(t, threads, num_repeats, num_executions)
+        if results:
+            benchmark_results.append((threads, results))
+
+    # Sort results by thread count
+    benchmark_results.sort(key=lambda x: x[0])
     
-    # After collecting all results for different thread counts, create a comparison table
-    if io_results and compute_results and total_results:
-        # Create Rich table for I/O speedup comparison
-        io_table = Table(title=f"I/O Speedup Comparison - {t['name']}", box=MARKDOWN)
-        io_table.add_column("Threads", justify="right", style="cyan")
-        io_table.add_column("I/O Time (s)", justify="right", style="green")
-        io_table.add_column("I/O Speedup", justify="right", style="magenta")
+    # Process results
+    for threads, result in benchmark_results:
+        all_results["io_results"].append({
+            "name": f"I/O time ({threads} threads)",
+            "min": result["io"]["min"],
+            "max": result["io"]["max"],
+            "mean": result["io"]["mean"],
+            "threads": threads
+        })
         
-        # Calculate I/O speedups
-        io_baseline = io_results[0]["mean"]  # 1 thread result
-        for result in io_results:
-            io_speedup = io_baseline / result["mean"] if result["mean"] > 0 else 0
-            io_table.add_row(
-                str(result["threads"]),
-                f"{result['mean']:.6f}",
-                f"{io_speedup:.2f}x"
-            )
+        all_results["compute_results"].append({
+            "name": f"Compute time ({threads} threads)",
+            "min": result["compute"]["min"],
+            "max": result["compute"]["max"],
+            "mean": result["compute"]["mean"],
+            "threads": threads
+        })
         
-        # Display the I/O speedup table
+        all_results["total_results"].append({
+            "name": f"Total time ({threads} threads)",
+            "min": result["total"]["min"],
+            "max": result["total"]["max"],
+            "mean": result["total"]["mean"],
+            "threads": threads
+        })
+    
+    # Create and display tables
+    if all_results["io_results"] and all_results["compute_results"] and all_results["total_results"]:
+        # Create and display I/O speedup table
+        io_table = create_speedup_table(
+            all_results["io_results"], 
+            0,  # baseline is first result (1 thread)
+            f"I/O Speedup Comparison - {t['name']}", 
+            "I/O"
+        )
         print(io_table)
         
-        # Create Rich table for compute speedup comparison
-        compute_table = Table(title=f"Compute Speedup Comparison - {t['name']}", box=MARKDOWN)
-        compute_table.add_column("Threads", justify="right", style="cyan")
-        compute_table.add_column("Compute Time (s)", justify="right", style="green")
-        compute_table.add_column("Compute Speedup", justify="right", style="magenta")
-        
-        # Calculate compute speedups
-        compute_baseline = compute_results[0]["mean"]  # 1 thread result
-        for result in compute_results:
-            compute_speedup = compute_baseline / result["mean"] if result["mean"] > 0 else 0
-            compute_table.add_row(
-                str(result["threads"]),
-                f"{result['mean']:.6f}",
-                f"{compute_speedup:.2f}x"
-            )
-        
-        # Display the compute speedup table
+        # Create and display compute speedup table
+        compute_table = create_speedup_table(
+            all_results["compute_results"], 
+            0,  # baseline is first result (1 thread)
+            f"Compute Speedup Comparison - {t['name']}", 
+            "Compute"
+        )
         print(compute_table)
         
-        # Create Rich table for total speedup comparison
-        total_table = Table(title=f"Total Speedup Comparison - {t['name']}", box=MARKDOWN)
-        total_table.add_column("Threads", justify="right", style="cyan")
-        total_table.add_column("Total Time (s)", justify="right", style="green")
-        total_table.add_column("Total Speedup", justify="right", style="magenta")
-        
-        # Calculate total speedups
-        total_baseline = total_results[0]["mean"]  # 1 thread result
-        for result in total_results:
-            total_speedup = total_baseline / result["mean"] if result["mean"] > 0 else 0
-            total_table.add_row(
-                str(result["threads"]),
-                f"{result['mean']:.6f}",
-                f"{total_speedup:.2f}x"
-            )
-        
-        # Display the total speedup table
+        # Create and display total speedup table
+        total_table = create_speedup_table(
+            all_results["total_results"], 
+            0,  # baseline is first result (1 thread)
+            f"Total Speedup Comparison - {t['name']}", 
+            "Total"
+        )
         print(total_table)
         
         # Save all speedup results to JSON
-        speedup_comparison = {
-            "test_case": t["name"],
-            "description": t["description"],
-            "io_results": io_results,
-            "compute_results": compute_results,
-            "total_results": total_results
-        }
-        json.dump(speedup_comparison, open(f"results/base_content_{t['name']}_separated_speedup.json", "w"))
+        result_file = Path("results") / f"base_content_{t['name']}_separated_speedup.json"
+        with open(result_file, 'w') as f:
+            json.dump(all_results, f, indent=2)
+        
+        print(f"Results saved to {result_file}")
