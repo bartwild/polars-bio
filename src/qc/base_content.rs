@@ -3,8 +3,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result};
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::thread;
+use rayon::prelude::*; // Import Rayon's parallel iterator traits
 
 /// Calculates base content percentages for each position in sequences
 pub fn calculate_base_content(sequences: &StringArray) -> Result<RecordBatch> {
@@ -128,50 +127,37 @@ pub fn calculate_base_content_parallel(sequences: &StringArray, num_threads: usi
         return create_empty_result();
     }
 
-    // Use at least 1 thread, but no more than the number of sequences
-    let num_threads = std::cmp::min(std::cmp::max(num_threads, 1), sequences.len());
+    // For very small datasets, just use the single-threaded version
+    if sequences.len() < 1000 || num_threads <= 1 {
+        return calculate_base_content(sequences);
+    }
     
-    // Create shared counters protected by Mutex
-    let a_counts = Arc::new(Mutex::new(vec![0.0; max_length]));
-    let c_counts = Arc::new(Mutex::new(vec![0.0; max_length]));
-    let g_counts = Arc::new(Mutex::new(vec![0.0; max_length]));
-    let t_counts = Arc::new(Mutex::new(vec![0.0; max_length]));
-    let n_counts = Arc::new(Mutex::new(vec![0.0; max_length]));
-
-    // Calculate chunk size for each thread
-    let chunk_size = (sequences.len() + num_threads - 1) / num_threads;
+    // Set the number of threads for Rayon
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build_global()
+        .map_err(|e| DataFusionError::Execution(format!("Failed to set global thread pool: {}", e)))?;
     
-    // Spawn threads to process chunks in parallel
-    let mut handles = vec![];
+    // Calculate chunk size for better work distribution
+    let chunk_size = std::cmp::max(
+        100, // Minimum chunk size
+        (sequences.len() + num_threads - 1) / num_threads
+    );
     
-    for thread_id in 0..num_threads {
-        let start = thread_id * chunk_size;
-        let end = std::cmp::min(start + chunk_size, sequences.len());
-        
-        // Skip empty chunks
-        if start >= end {
-            continue;
-        }
-        
-        // Clone Arc references for this thread
-        let sequences = sequences.clone();
-        let a_counts_clone = Arc::clone(&a_counts);
-        let c_counts_clone = Arc::clone(&c_counts);
-        let g_counts_clone = Arc::clone(&g_counts);
-        let t_counts_clone = Arc::clone(&t_counts);
-        let n_counts_clone = Arc::clone(&n_counts);
-        
-        // Spawn thread
-        let handle = thread::spawn(move || {
-            // Create local counters for this thread
+    // Process data in parallel using Rayon
+    let (a_counts, c_counts, g_counts, t_counts, n_counts) = (0..sequences.len())
+        .collect::<Vec<_>>() // Convert range to Vec for parallel processing
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            // Create local counters for this chunk
             let mut local_a_counts = vec![0.0; max_length];
             let mut local_c_counts = vec![0.0; max_length];
             let mut local_g_counts = vec![0.0; max_length];
             let mut local_t_counts = vec![0.0; max_length];
             let mut local_n_counts = vec![0.0; max_length];
             
-            // Process assigned sequences
-            for i in start..end {
+            // Process sequences in this chunk
+            for &i in chunk {
                 if sequences.is_valid(i) {
                     let seq = sequences.value(i);
                     for (pos, base) in seq.chars().enumerate() {
@@ -186,38 +172,22 @@ pub fn calculate_base_content_parallel(sequences: &StringArray, num_threads: usi
                 }
             }
             
-            // Merge local counts into shared counts
-            {
-                let mut a_counts = a_counts_clone.lock().unwrap();
-                let mut c_counts = c_counts_clone.lock().unwrap();
-                let mut g_counts = g_counts_clone.lock().unwrap();
-                let mut t_counts = t_counts_clone.lock().unwrap();
-                let mut n_counts = n_counts_clone.lock().unwrap();
-                
+            (local_a_counts, local_c_counts, local_g_counts, local_t_counts, local_n_counts)
+        })
+        .reduce(
+            || (vec![0.0; max_length], vec![0.0; max_length], vec![0.0; max_length], vec![0.0; max_length], vec![0.0; max_length]),
+            |mut acc, chunk_counts| {
+                let (chunk_a, chunk_c, chunk_g, chunk_t, chunk_n) = chunk_counts;
                 for i in 0..max_length {
-                    a_counts[i] += local_a_counts[i];
-                    c_counts[i] += local_c_counts[i];
-                    g_counts[i] += local_g_counts[i];
-                    t_counts[i] += local_t_counts[i];
-                    n_counts[i] += local_n_counts[i];
+                    acc.0[i] += chunk_a[i];
+                    acc.1[i] += chunk_c[i];
+                    acc.2[i] += chunk_g[i];
+                    acc.3[i] += chunk_t[i];
+                    acc.4[i] += chunk_n[i];
                 }
+                acc
             }
-        });
-        
-        handles.push(handle);
-    }
-    
-    // Wait for all threads to complete
-    for handle in handles {
-        handle.join().unwrap();
-    }
-    
-    // Get final counts
-    let a_counts = Arc::try_unwrap(a_counts).unwrap().into_inner().unwrap();
-    let c_counts = Arc::try_unwrap(c_counts).unwrap().into_inner().unwrap();
-    let g_counts = Arc::try_unwrap(g_counts).unwrap().into_inner().unwrap();
-    let t_counts = Arc::try_unwrap(t_counts).unwrap().into_inner().unwrap();
-    let n_counts = Arc::try_unwrap(n_counts).unwrap().into_inner().unwrap();
+        );
 
     // Convert counts to percentages
     let positions: Vec<i32> = (0..max_length as i32).collect();
