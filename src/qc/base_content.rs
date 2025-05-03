@@ -251,7 +251,7 @@ pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Re
     };
     
     // Process data in parallel using Rayon with adaptive chunking
-    let (a_counts, c_counts, g_counts, t_counts, n_counts) = all_sequences
+    let (a_counts, c_counts, g_counts, t_counts, n_counts, pos_counts) = all_sequences
         .par_chunks(chunk_size)
         .map(|chunk| {
             // Create local counters for this chunk
@@ -260,10 +260,17 @@ pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Re
             let mut local_g_counts = vec![0.0; max_length];
             let mut local_t_counts = vec![0.0; max_length];
             let mut local_n_counts = vec![0.0; max_length];
+            let mut local_pos_counts = vec![0.0; max_length]; // Track sequences per position
             
             // Process sequences in this chunk
             for &(seq, _) in chunk {
                 let seq_bytes = seq.as_bytes();
+                let seq_len = seq_bytes.len();
+                
+                // Increment position counts for each position in this sequence
+                for pos in 0..seq_len {
+                    local_pos_counts[pos] += 1.0;
+                }
                 
                 // Use SIMD acceleration if available
                 #[cfg(target_arch = "x86_64")]
@@ -293,9 +300,9 @@ pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Re
                 }
             }
             
-            (local_a_counts, local_c_counts, local_g_counts, local_t_counts, local_n_counts)
+            (local_a_counts, local_c_counts, local_g_counts, local_t_counts, local_n_counts, local_pos_counts)
         })
-        .reduce_with(|(mut a1, mut c1, mut g1, mut t1, mut n1), (a2, c2, g2, t2, n2)| {
+        .reduce_with(|(mut a1, mut c1, mut g1, mut t1, mut n1, mut pos1), (a2, c2, g2, t2, n2, pos2)| {
             // Use SIMD for vector addition when possible
             #[cfg(target_arch = "x86_64")]
             {
@@ -315,6 +322,8 @@ pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Re
                             let t2_vec = _mm256_loadu_pd(&t2[i]);
                             let n1_vec = _mm256_loadu_pd(&n1[i]);
                             let n2_vec = _mm256_loadu_pd(&n2[i]);
+                            let pos1_vec = _mm256_loadu_pd(&pos1[i]);
+                            let pos2_vec = _mm256_loadu_pd(&pos2[i]);
                             
                             // Add vectors
                             let a_sum = _mm256_add_pd(a1_vec, a2_vec);
@@ -322,6 +331,7 @@ pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Re
                             let g_sum = _mm256_add_pd(g1_vec, g2_vec);
                             let t_sum = _mm256_add_pd(t1_vec, t2_vec);
                             let n_sum = _mm256_add_pd(n1_vec, n2_vec);
+                            let pos_sum = _mm256_add_pd(pos1_vec, pos2_vec);
                             
                             // Store results
                             _mm256_storeu_pd(&mut a1[i], a_sum);
@@ -329,6 +339,7 @@ pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Re
                             _mm256_storeu_pd(&mut g1[i], g_sum);
                             _mm256_storeu_pd(&mut t1[i], t_sum);
                             _mm256_storeu_pd(&mut n1[i], n_sum);
+                            _mm256_storeu_pd(&mut pos1[i], pos_sum);
                             
                             i += 4;
                         }
@@ -340,6 +351,7 @@ pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Re
                             g1[j] += g2[j];
                             t1[j] += t2[j];
                             n1[j] += n2[j];
+                            pos1[j] += pos2[j];
                         }
                     }
                 } else {
@@ -350,6 +362,7 @@ pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Re
                         g1[i] += g2[i];
                         t1[i] += t2[i];
                         n1[i] += n2[i];
+                        pos1[i] += pos2[i];
                     }
                 }
             }
@@ -363,10 +376,11 @@ pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Re
                     g1[i] += g2[i];
                     t1[i] += t2[i];
                     n1[i] += n2[i];
+                    pos1[i] += pos2[i];
                 }
             }
             
-            (a1, c1, g1, t1, n1)
+            (a1, c1, g1, t1, n1, pos1)
         })
         .unwrap_or((
             vec![0.0; max_length],
@@ -374,17 +388,32 @@ pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Re
             vec![0.0; max_length],
             vec![0.0; max_length],
             vec![0.0; max_length],
+            vec![0.0; max_length],
         ));
     
-    // Convert counts to percentages using parallel processing
+    // Convert counts to percentages using parallel processing with position-specific counts
     let positions: Vec<i32> = (0..max_length as i32).collect();
     
-    // Use parallel iterators directly for each percentage calculation
-    let a_percentages: Vec<f64> = a_counts.par_iter().map(|&count| (count / seq_count) * 100.0).collect();
-    let c_percentages: Vec<f64> = c_counts.par_iter().map(|&count| (count / seq_count) * 100.0).collect();
-    let g_percentages: Vec<f64> = g_counts.par_iter().map(|&count| (count / seq_count) * 100.0).collect();
-    let t_percentages: Vec<f64> = t_counts.par_iter().map(|&count| (count / seq_count) * 100.0).collect();
-    let n_percentages: Vec<f64> = n_counts.par_iter().map(|&count| (count / seq_count) * 100.0).collect();
+    // Use parallel iterators with position-specific sequence counts
+    let a_percentages: Vec<f64> = a_counts.par_iter().zip(pos_counts.par_iter())
+        .map(|(&count, &pos_count)| if pos_count > 0.0 { (count / pos_count) * 100.0 } else { 0.0 })
+        .collect();
+    
+    let c_percentages: Vec<f64> = c_counts.par_iter().zip(pos_counts.par_iter())
+        .map(|(&count, &pos_count)| if pos_count > 0.0 { (count / pos_count) * 100.0 } else { 0.0 })
+        .collect();
+    
+    let g_percentages: Vec<f64> = g_counts.par_iter().zip(pos_counts.par_iter())
+        .map(|(&count, &pos_count)| if pos_count > 0.0 { (count / pos_count) * 100.0 } else { 0.0 })
+        .collect();
+    
+    let t_percentages: Vec<f64> = t_counts.par_iter().zip(pos_counts.par_iter())
+        .map(|(&count, &pos_count)| if pos_count > 0.0 { (count / pos_count) * 100.0 } else { 0.0 })
+        .collect();
+    
+    let n_percentages: Vec<f64> = n_counts.par_iter().zip(pos_counts.par_iter())
+        .map(|(&count, &pos_count)| if pos_count > 0.0 { (count / pos_count) * 100.0 } else { 0.0 })
+        .collect();
 
     create_result_batch(max_length, positions, a_percentages, c_percentages, g_percentages, t_percentages, n_percentages)
 }
