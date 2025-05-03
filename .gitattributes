@@ -1,0 +1,1 @@
+tests/data/qc/example.fastq filter=lfs diff=lfs merge=lfs -text
