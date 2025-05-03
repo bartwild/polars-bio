@@ -111,4 +111,15 @@ def base_content(
         arrow_table = pa.Table.from_batches(collected_data)
         polars_df = pl.from_arrow(arrow_table)
 
-    return polars_df
+    input_type = type(df).__name__
+    if output_type is None:
+        if input_type == "DataFrame" and "pandas" in pd.DataFrame.__module__:
+            output_type = "pandas.DataFrame"
+        else:
+            output_type = "polars.DataFrame"
+
+    # Convert to requested output type
+    if output_type == "pandas.DataFrame":
+        return polars_df.to_pandas()
+    else:
+        return polars_df

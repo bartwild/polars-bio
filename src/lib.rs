@@ -8,7 +8,6 @@ mod udtf;
 mod utils;
 pub mod qc;
 
-use pyo3::types::PyBytes;
 use std::string::ToString;
 use std::sync::{Arc, Mutex};
 
