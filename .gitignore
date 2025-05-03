@@ -16,3 +16,4 @@ benchmark/src/results
 benchmark/src/results/overlap
 mprofile*dat
 *csv
+tests/data/qc
