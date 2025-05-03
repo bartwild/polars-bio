@@ -414,36 +414,29 @@ fn base_content_analysis(
     py_ctx: &PyBioSessionContext,
     df: PyObject,
 ) -> PyResult<PyDataFrame> {
-    // First, extract the sequence data while holding the GIL
     let sequence_col = df.getattr(py, "select")?
         .call1(py, (PyString::new_bound(py, "sequence"),))?;
     
-    // Convert to Arrow RecordBatch
     let arrow_batch = sequence_col.getattr(py, "to_arrow")?
         .call0(py)?;
     
-    // Extract StringArray from RecordBatch
     let sequence_array = arrow_batch
         .getattr(py, "column")?
         .call1(py, (0,))?;
     
-    // Convert PyArrow array to Rust StringArray
     let py_list = sequence_array.getattr(py, "to_pylist")?.call0(py)?;
     let sequence_values: Vec<Option<String>> = py_list.extract(py)?;
     
     let string_array = StringArray::from(sequence_values);
     
-    // Now we can release the GIL for the computation-heavy part
     py.allow_threads(|| {
         let rt = Runtime::new().unwrap();
         
-        // Calculate base content
         let result_batch = match crate::qc::base_content::calculate_base_content(&string_array) {
             Ok(batch) => batch,
             Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Error calculating base content: {}", e))),
         };
         
-        // Convert back to PyDataFrame
         let df = rt.block_on(async {
             let ctx = &py_ctx.ctx;
             let mem_table = MemTable::try_new(result_batch.schema(), vec![vec![result_batch]]).unwrap();
@@ -463,36 +456,29 @@ fn base_content_analysis_parallel(
     df: PyObject,
     num_threads: usize,
 ) -> PyResult<PyDataFrame> {
-    // First, extract the sequence data while holding the GIL
     let sequence_col = df.getattr(py, "select")?
         .call1(py, (PyString::new_bound(py, "sequence"),))?;
     
-    // Convert to Arrow RecordBatch
     let arrow_batch = sequence_col.getattr(py, "to_arrow")?
         .call0(py)?;
     
-    // Extract StringArray from RecordBatch
     let sequence_array = arrow_batch
         .getattr(py, "column")?
         .call1(py, (0,))?;
     
-    // Convert PyArrow array to Rust StringArray
     let py_list = sequence_array.getattr(py, "to_pylist")?.call0(py)?;
     let sequence_values: Vec<Option<String>> = py_list.extract(py)?;
     
     let string_array = StringArray::from(sequence_values);
     
-    // Now we can release the GIL for the computation-heavy part
     py.allow_threads(|| {
         let rt = Runtime::new().unwrap();
         
-        // Calculate base content using parallel implementation
         let result_batch = match crate::qc::base_content::calculate_base_content_parallel(&string_array, num_threads) {
             Ok(batch) => batch,
             Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Error calculating base content: {}", e))),
         };
         
-        // Convert back to PyDataFrame
         let df = rt.block_on(async {
             let ctx = &py_ctx.ctx;
             let mem_table = MemTable::try_new(result_batch.schema(), vec![vec![result_batch]]).unwrap();

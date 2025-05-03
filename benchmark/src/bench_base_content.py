@@ -1,33 +1,24 @@
 import os
-import time
 import json
-import numpy as np
-import polars as pl
-import polars_bio as pb
 from rich import print
 from rich.box import MARKDOWN
 from rich.table import Table
 import subprocess
 import tempfile
-import multiprocessing
 from pathlib import Path
 
-# Ensure results directory exists
 os.makedirs("results", exist_ok=True)
 
-# Set environment variables
-os.environ["POLARS_MAX_THREADS"] = "1"  # For single-threaded tests
+os.environ["POLARS_MAX_THREADS"] = "1"
 BENCH_DATA_ROOT = os.getenv("BENCH_DATA_ROOT", '/home/dbartosiak/praca/polars-bio/tests/data/qc/example.fastq')
 
 if BENCH_DATA_ROOT is None:
     raise ValueError("BENCH_DATA_ROOT is not set")
 
-# Test parameters
 num_repeats = 3
 num_executions = 3
-test_threads = [1, 8]  # For parallel tests
+test_threads = [1, 8]
 
-# Test cases - adjust paths as needed
 test_cases = [{
         "file_path": f"{BENCH_DATA_ROOT}",
         "name": "large",
@@ -35,13 +26,12 @@ test_cases = [{
     }
 ]
 
-# Function to run a single benchmark in a separate process
+
 def run_single_benchmark(test_case, threads, repeats, executions):
     """Run a single benchmark with specified parameters and return results"""
     result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
     result_file.close()
     
-    # Create a temporary script file
     script_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py')
     script_file.write(f"""
 import time
@@ -106,29 +96,25 @@ with open("{result_file.name}", "w") as f:
 """)
     script_file.close()
     
-    # Run the script in a separate process
     try:
         subprocess.run(["python", script_file.name], check=True)
         
-        # Read results
         with open(result_file.name, 'r') as f:
             results = json.load(f)
             
-        # Clean up temporary files
         os.unlink(script_file.name)
         os.unlink(result_file.name)
         
         return results
     except Exception as e:
         print(f"Error running benchmark with {threads} threads: {e}")
-        # Clean up temporary files even if there's an error
         if os.path.exists(script_file.name):
             os.unlink(script_file.name)
         if os.path.exists(result_file.name):
             os.unlink(result_file.name)
         return None
 
-# Function to create a formatted table of results
+
 def create_speedup_table(results, baseline_idx, title, metric):
     table = Table(title=title, box=MARKDOWN)
     table.add_column("Threads", justify="right", style="cyan")
@@ -146,11 +132,10 @@ def create_speedup_table(results, baseline_idx, title, metric):
     
     return table
 
-# Main benchmark loop
+
 for t in test_cases:
     print(f"Testing {t['name']}...")
     
-    # Prepare result structure
     all_results = {
         "test_case": t["name"],
         "description": t["description"],
@@ -159,7 +144,6 @@ for t in test_cases:
         "total_results": []
     }
     
-    # Run benchmarks for each thread count
     benchmark_results = []
     for threads in test_threads:
         print(f"Testing {t['name']} with {threads} threads in a separate process...")
@@ -167,10 +151,8 @@ for t in test_cases:
         if results:
             benchmark_results.append((threads, results))
 
-    # Sort results by thread count
     benchmark_results.sort(key=lambda x: x[0])
     
-    # Process results
     for threads, result in benchmark_results:
         all_results["io_results"].append({
             "name": f"I/O time ({threads} threads)",
@@ -196,36 +178,31 @@ for t in test_cases:
             "threads": threads
         })
     
-    # Create and display tables
     if all_results["io_results"] and all_results["compute_results"] and all_results["total_results"]:
-        # Create and display I/O speedup table
         io_table = create_speedup_table(
             all_results["io_results"], 
-            0,  # baseline is first result (1 thread)
+            0, 
             f"I/O Speedup Comparison - {t['name']}", 
             "I/O"
         )
         print(io_table)
         
-        # Create and display compute speedup table
         compute_table = create_speedup_table(
             all_results["compute_results"], 
-            0,  # baseline is first result (1 thread)
+            0,  
             f"Compute Speedup Comparison - {t['name']}", 
             "Compute"
         )
         print(compute_table)
         
-        # Create and display total speedup table
         total_table = create_speedup_table(
             all_results["total_results"], 
-            0,  # baseline is first result (1 thread)
+            0,  
             f"Total Speedup Comparison - {t['name']}", 
             "Total"
         )
         print(total_table)
         
-        # Save all speedup results to JSON
         result_file = Path("results") / f"base_content_{t['name']}_separated_speedup.json"
         with open(result_file, 'w') as f:
             json.dump(all_results, f, indent=2)
