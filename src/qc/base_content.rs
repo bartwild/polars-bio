@@ -5,63 +5,9 @@ use datafusion::error::{DataFusionError, Result};
 use std::sync::Arc;
 use rayon::prelude::*;
 use std::sync::Once;
-use std::cmp;
 use std::arch::x86_64::*;
 
 static THREAD_POOL_INIT: Once = Once::new();
-
-/// Calculates base content percentages for each position in sequences
-pub fn calculate_base_content(sequences: &StringArray) -> Result<RecordBatch> {
-    let seq_count = sequences.len() as f64;
-    if seq_count == 0.0 {
-        return create_empty_result();
-    }
-
-    // Find the maximum sequence length
-    let max_length = sequences
-        .iter()
-        .filter_map(|seq| seq.map(|s| s.len()))
-        .max()
-        .unwrap_or(0);
-
-    if max_length == 0 {
-        return create_empty_result();
-    }
-
-    // Initialize counters for each base at each position
-    let mut a_counts = vec![0.0; max_length];
-    let mut c_counts = vec![0.0; max_length];
-    let mut g_counts = vec![0.0; max_length];
-    let mut t_counts = vec![0.0; max_length];
-    let mut n_counts = vec![0.0; max_length];
-
-    // Count bases at each position
-    for i in 0..sequences.len() {
-        // Check if the value is not null
-        if sequences.is_valid(i) {
-            let seq = sequences.value(i);
-            for (pos, base) in seq.bytes().enumerate() {
-                match base {
-                    b'A' | b'a' => a_counts[pos] += 1.0,
-                    b'C' | b'c' => c_counts[pos] += 1.0,
-                    b'G' | b'g' => g_counts[pos] += 1.0,
-                    b'T' | b't' => t_counts[pos] += 1.0,
-                    _ => n_counts[pos] += 1.0,
-                }
-            }
-        }
-    }
-
-    // Convert counts to percentages
-    let positions: Vec<i32> = (0..max_length as i32).collect();
-    let a_percentages: Vec<f64> = a_counts.iter().map(|&count| (count / seq_count) * 100.0).collect();
-    let c_percentages: Vec<f64> = c_counts.iter().map(|&count| (count / seq_count) * 100.0).collect();
-    let g_percentages: Vec<f64> = g_counts.iter().map(|&count| (count / seq_count) * 100.0).collect();
-    let t_percentages: Vec<f64> = t_counts.iter().map(|&count| (count / seq_count) * 100.0).collect();
-    let n_percentages: Vec<f64> = n_counts.iter().map(|&count| (count / seq_count) * 100.0).collect();
-
-    create_result_batch(max_length, positions, a_percentages, c_percentages, g_percentages, t_percentages, n_percentages)
-}
 
 fn create_empty_result() -> Result<RecordBatch> {
     // Create an empty schema
@@ -224,7 +170,7 @@ unsafe fn count_bases_simd(seq: &[u8], a_counts: &mut [f64], c_counts: &mut [f64
     }
 }
 
-pub fn calculate_base_content_parallel(sequences: &StringArray, num_threads: usize) -> Result<RecordBatch> {
+pub fn calculate_base_content(sequences: &StringArray, num_threads: usize) -> Result<RecordBatch> {
     let seq_count = sequences.len() as f64;
     if seq_count == 0.0 {
         return create_empty_result();
@@ -239,11 +185,6 @@ pub fn calculate_base_content_parallel(sequences: &StringArray, num_threads: usi
 
     if max_length == 0 {
         return create_empty_result();
-    }
-
-    // For very small datasets, just use the single-threaded version
-    if sequences.len() < 1000 || num_threads <= 1 {
-        return calculate_base_content(sequences);
     }
     
     // Set the number of threads for Rayon only if not already initialized

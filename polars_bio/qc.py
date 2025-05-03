@@ -6,63 +6,6 @@ from .context import ctx
 import pyarrow as pa
 
 
-def base_content(
-    df: Union[pl.DataFrame, pl.LazyFrame, pd.DataFrame],
-    output_type: str = "polars.DataFrame"
-) -> Union[pl.DataFrame, pd.DataFrame]:
-    """
-    Calculate base content percentages for each position in sequences.
-    
-    Parameters
-    ----------
-    df : Union[pl.DataFrame, pl.LazyFrame, pd.DataFrame]
-        DataFrame containing a 'sequence' column with DNA/RNA sequences
-    output_type : str, optional
-        Output type, by default "polars.DataFrame"
-        
-    Returns
-    -------
-    Union[pl.DataFrame, pd.DataFrame]
-        DataFrame with base content percentages for each position
-    
-    Examples
-    --------
-    >>> import polars_bio as pb
-    >>> df = pb.read_fastq("example.fastq").collect()
-    >>> base_content_df = pb.qc.base_content(df)
-    >>> pb.qc.visualize_base_content(base_content_df)
-    """
-    from polars_bio.polars_bio import base_content_analysis
-    
-    if isinstance(df, pd.DataFrame):
-        df = pl.from_pandas(df)
-    elif isinstance(df, pl.LazyFrame):
-        df = df.collect()
-    
-    if "sequence" not in df.columns:
-        raise ValueError("DataFrame must contain a 'sequence' column")
-    
-    record_batches = base_content_analysis(ctx, df)
-    
-    if isinstance(record_batches, list) and len(record_batches) > 0:
-        arrow_table = pa.Table.from_batches(record_batches)
-        result = pl.from_arrow(arrow_table)
-    else:
-        result = pl.DataFrame({
-            "position": [],
-            "A": [],
-            "C": [],
-            "G": [],
-            "T": [],
-            "N": []
-        })
-    
-    if output_type == "pandas.DataFrame":
-        return result.to_pandas()
-    else:
-        return result
-
-
 def visualize_base_content(
     df: Union[pl.DataFrame, pd.DataFrame],
     figsize: tuple = (12, 6),
@@ -118,7 +61,7 @@ def visualize_base_content(
     plt.show()
 
 
-def base_content_parallel(
+def base_content(
     df: Union[pl.DataFrame, pl.LazyFrame, pd.DataFrame],
     num_threads: int = 4,
     output_type: str = "polars.DataFrame"
@@ -147,8 +90,8 @@ def base_content_parallel(
     >>> base_content_df = pb.qc.base_content_parallel(df, num_threads=8)
     >>> pb.qc.visualize_base_content(base_content_df)
     """
-    from polars_bio.polars_bio import base_content_analysis_parallel
-    
+    from polars_bio.polars_bio import base_content_analysis
+
     if isinstance(df, pd.DataFrame):
         df = pl.from_pandas(df)
     elif isinstance(df, pl.LazyFrame):
@@ -157,22 +100,15 @@ def base_content_parallel(
     if "sequence" not in df.columns:
         raise ValueError("DataFrame must contain a 'sequence' column")
     
-    record_batches = base_content_analysis_parallel(ctx, df, num_threads)
+    result_df = base_content_analysis(ctx, df, num_threads)
     
-    if isinstance(record_batches, list) and len(record_batches) > 0:
-        arrow_table = pa.Table.from_batches(record_batches)
-        result = pl.from_arrow(arrow_table)
-    else:
-        result = pl.DataFrame({
-            "position": [],
-            "A": [],
-            "C": [],
-            "G": [],
-            "T": [],
-            "N": []
-        })
-    
-    if output_type == "pandas.DataFrame":
-        return result.to_pandas()
-    else:
-        return result
+    collected_data = result_df.collect()
+    if isinstance(collected_data, pl.DataFrame):
+        polars_df = collected_data
+    elif isinstance(collected_data, pa.Table):
+        polars_df = pl.from_arrow(collected_data)
+    elif isinstance(collected_data, list) and all(isinstance(batch, pa.RecordBatch) for batch in collected_data):
+        arrow_table = pa.Table.from_batches(collected_data)
+        polars_df = pl.from_arrow(arrow_table)
+
+    return polars_df
