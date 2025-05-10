@@ -3,7 +3,7 @@ SHELL=/bin/bash
 
 venv:  ## Set up virtual environment
 	python3 -m venv .venv
-	poetry lock --no-update
+	poetry lock
 	poetry install
 
 install: venv

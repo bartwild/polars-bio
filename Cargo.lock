@@ -5415,6 +5415,7 @@ dependencies = [
  "futures-util",
  "log",
  "num_cpus",
+ "once_cell",
  "polars",
  "polars-arrow",
  "polars-core",

@@ -1,15 +1,19 @@
 use std::any::Any;
 use std::sync::Arc;
-use arrow::array::{ArrayRef, StringArray};
+
+use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+
 use async_stream::stream;
+use futures::StreamExt;
+
 use datafusion::common::{Result, Statistics};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::{TableType, UserDefinedTableFunction};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, SendableRecordBatchStream as PhysicalSendableRecordBatchStream};
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use futures::Stream;
+
 use crate::qc::base_content::calculate_base_content;
 
 #[derive(Debug, Clone)]
@@ -27,7 +31,6 @@ impl BaseContentUDTF {
             Field::new("T", DataType::Float64, false),
             Field::new("N", DataType::Float64, false),
         ]));
-
         BaseContentUDTF { schema }
     }
 }
@@ -47,48 +50,44 @@ impl UserDefinedTableFunction for BaseContentUDTF {
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let schema = self.schema.clone();
-        
-        // Process each partition
         let mut result_batches = Vec::new();
-        
+        println!("This is a message from Rust!");
         for partition in partitions {
             for batch in partition {
-                // Find the sequence column
                 let sequence_col_idx = batch
                     .schema()
-                    .fields()
-                    .iter()
-                    .position(|f| f.name() == "sequence")
-                    .ok_or_else(|| {
+                    .index_of("sequence")
+                    .map_err(|_| {
                         datafusion::error::DataFusionError::Execution(
                             "No 'sequence' column found in input".to_string(),
                         )
                     })?;
-                
-                // Get the sequence column as a StringArray
+
                 let sequence_array = batch
                     .column(sequence_col_idx)
                     .as_any()
                     .downcast_ref::<StringArray>()
                     .ok_or_else(|| {
                         datafusion::error::DataFusionError::Execution(
-                            "The 'sequence' column is not a string array".to_string(),
+                            "'sequence' column is not a StringArray".to_string(),
                         )
                     })?;
-                
-                // Calculate base content
-                let result_batch = calculate_base_content(sequence_array)?;
+
+                let num_threads = _context
+                    .session_config()
+                    .target_partitions()
+                    .unwrap_or(1);
+                let result_batch = calculate_base_content(sequence_array, num_threads)?;
                 result_batches.push(result_batch);
             }
         }
-        
-        // Combine results from all partitions
+
         let stream = stream! {
             for batch in result_batches {
                 yield Ok(batch);
             }
         };
-        
+
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, Box::pin(stream))))
     }
 
@@ -118,7 +117,7 @@ impl BaseContentExec {
             Field::new("N", DataType::Float64, false),
         ]));
 
-        BaseContentExec { input, schema }
+        Self { input, schema }
     }
 }
 
@@ -147,53 +146,50 @@ impl ExecutionPlan for BaseContentExec {
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(BaseContentExec::new(children[0].clone())))
+        Ok(Arc::new(Self::new(children[0].clone())))
     }
 
     fn execute(
         &self,
         partition: usize,
         context: Arc<TaskContext>,
-    ) -> Result<PhysicalSendableRecordBatchStream> {
-        let input_stream = self.input.execute(partition, context.clone())?;
+    ) -> Result<SendableRecordBatchStream> {
         let schema = self.schema.clone();
-        
-        let stream = Box::pin(stream! {
-            let mut input_stream = input_stream;
-            
+        let input_stream = self.input.execute(partition, context)?;
+
+        let stream = stream! {
+            futures::pin_mut!(input_stream);
             while let Some(batch_result) = input_stream.next().await {
                 let batch = batch_result?;
-                
-                // Find the sequence column
+
                 let sequence_col_idx = batch
                     .schema()
-                    .fields()
-                    .iter()
-                    .position(|f| f.name() == "sequence")
-                    .ok_or_else(|| {
+                    .index_of("sequence")
+                    .map_err(|_| {
                         datafusion::error::DataFusionError::Execution(
                             "No 'sequence' column found in input".to_string(),
                         )
                     })?;
-                
-                // Get the sequence column as a StringArray
+
                 let sequence_array = batch
                     .column(sequence_col_idx)
                     .as_any()
                     .downcast_ref::<StringArray>()
                     .ok_or_else(|| {
                         datafusion::error::DataFusionError::Execution(
-                            "The 'sequence' column is not a string array".to_string(),
+                            "'sequence' column is not a StringArray".to_string(),
                         )
                     })?;
-                
-                // Calculate base content
-                let result_batch = calculate_base_content(sequence_array)?;
+                let num_threads = _context
+                    .session_config()
+                    .target_partitions()
+                    .unwrap_or(1);
+                let result_batch = calculate_base_content(sequence_array, num_threads)?;
                 yield Ok(result_batch);
             }
-        });
-        
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+        };
+
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, Box::pin(stream))))
     }
 
     fn statistics(&self) -> Statistics {
