@@ -410,8 +410,7 @@ fn py_from_polars(
 fn base_content_analysis(
     py: Python,
     py_ctx: &PyBioSessionContext,
-    df: PyObject,
-    num_threads: usize,
+    df: PyObject
 ) -> PyResult<PyDataFrame> {
     let sequence_col = df.getattr(py, "select")?
         .call1(py, (PyString::new_bound(py, "sequence"),))?;
@@ -427,13 +426,16 @@ fn base_content_analysis(
     let sequence_values: Vec<Option<String>> = py_list.extract(py)?;
     
     let string_array = StringArray::from(sequence_values);
-    
+    let target_partitions_opt = py_ctx.get_option("datafusion.execution.target_partitions");
+    let num_threads = match target_partitions_opt {
+        Some(val) => val.parse::<usize>().unwrap_or(1),
+        None => 1,
+    };
     py.allow_threads(|| {
         let rt = Runtime::new().unwrap();
-
         let result_batch = match crate::qc::base_content::calculate_base_content(&string_array, num_threads) {
             Ok(batch) => {
-                println!("Successfully calculated base content, row count: {}", batch.num_rows());
+                println!("Successfully calculated base content, column count: {}", batch.num_rows());
                 batch
             },
             Err(e) => {

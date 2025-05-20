@@ -1,76 +1,72 @@
 import os
 import json
+import time
 from rich import print
-from rich.box import MARKDOWN
 from rich.table import Table
+from rich.box import MARKDOWN
 import subprocess
 import tempfile
 from pathlib import Path
 
 os.makedirs("results", exist_ok=True)
 
-os.environ["POLARS_MAX_THREADS"] = "1"
-BENCH_DATA_ROOT = os.getenv("BENCH_DATA_ROOT", '/home/dbartosiak/praca/polars-bio/tests/data/qc/example.fastq')
+BENCH_DATA_ROOT = os.getenv("BENCH_DATA_ROOT", "/home/rafalunix/polars-bio/tests/data/small3.fastq")
 
-if BENCH_DATA_ROOT is None:
-    raise ValueError("BENCH_DATA_ROOT is not set")
+if not BENCH_DATA_ROOT or not Path(BENCH_DATA_ROOT).exists():
+    raise ValueError(f"BENCH_DATA_ROOT is not set or file does not exist: {BENCH_DATA_ROOT}")
 
-num_repeats = 3
-num_executions = 3
-test_threads = [1, 8]
+NUM_REPEATS = 100
+THREADS_LIST = [8, 4, 1]
 
-test_cases = [{
-        "file_path": f"{BENCH_DATA_ROOT}",
-        "name": "large",
-        "description": "Large FASTQ file (~1GB)"
-    }
-]
+TEST_CASES = [{
+    "file_path": BENCH_DATA_ROOT,
+    "name": "large",
+    "description": "Large FASTQ file (~1GB)"
+}]
 
-
-def run_single_benchmark(test_case, threads, repeats, executions):
-    """Run a single benchmark with specified parameters and return results"""
-    result_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
+def run_single_benchmark(test_case, threads, repeats):
+    result_file = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
     result_file.close()
-    
-    script_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py')
-    script_file.write(f"""
+
+    script_content = f"""
 import time
 import polars as pl
 import polars_bio as pb
 import json
 
-# Run the benchmark with {threads} threads
-file_path = "{test_case['file_path']}"
+file_path = r"{test_case['file_path']}"
 num_threads = {threads}
 num_repeats = {repeats}
-num_executions = {executions}
 
 io_times = []
 compute_times = []
 total_times = []
 
 for _ in range(num_repeats):
-    for _ in range(num_executions):
-        # Load data
-        start_io = time.time()
-        # Use read_fastq instead of read_csv for FASTQ files
-        df = pb.read_fastq(file_path).collect()
-        io_time = time.time() - start_io
-        
-        # Process data
-        start_compute = time.time()
-        # Extract sequence column for base content analysis
-        sequences_df = df.select("sequence")
-        result = pb.qc.base_content_parallel(sequences_df, num_threads=num_threads)
-        compute_time = time.time() - start_compute
-        
-        total_time = io_time + compute_time
-        
-        io_times.append(io_time)
-        compute_times.append(compute_time)
-        total_times.append(total_time)
+    # Force garbage collection between runs
+    import gc
+    gc.collect()
 
-# Calculate statistics
+    start_total = time.time()
+
+    # Simulated I/O timer
+    start_io = time.time()
+    df = pb.read_fastq(file_path)
+    collected = df.collect()
+    io_time = time.time() - start_io
+
+    # Compute timer
+    start_compute = time.time()
+    seq = collected.select("sequence")
+    result = pb.qc.base_content(seq, num_threads=num_threads)
+    compute_time = time.time() - start_compute
+
+    total_time = time.time() - start_total
+
+    io_times.append(io_time)
+    compute_times.append(compute_time)
+    total_times.append(total_time)
+
 results = {{
     "threads": num_threads,
     "io": {{
@@ -90,37 +86,46 @@ results = {{
     }}
 }}
 
-# Save results
-with open("{result_file.name}", "w") as f:
+with open(r"{result_file.name}", "w") as f:
     json.dump(results, f)
-""")
-    script_file.close()
-    
-    try:
-        subprocess.run(["python", script_file.name], check=True)
-        
-        with open(result_file.name, 'r') as f:
-            results = json.load(f)
-            
-        os.unlink(script_file.name)
-        os.unlink(result_file.name)
-        
-        return results
-    except Exception as e:
-        print(f"Error running benchmark with {threads} threads: {e}")
-        if os.path.exists(script_file.name):
-            os.unlink(script_file.name)
-        if os.path.exists(result_file.name):
-            os.unlink(result_file.name)
-        return None
+"""
 
+    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".py") as f:
+        f.write(script_content)
+        script_path = f.name
+
+    try:
+        completed = subprocess.run(
+            ["python", script_path],
+            capture_output=True,
+            check=True,
+            text=True
+        )
+        if completed.stdout.strip():
+            print("[green]Subprocess stdout:[/green]")
+            print(completed.stdout)
+        if completed.stderr.strip():
+            print("[red]Subprocess stderr:[/red]")
+            print(completed.stderr)
+
+        with open(result_file.name, "r") as f:
+            results = json.load(f)
+
+        return results
+
+    except subprocess.CalledProcessError as e:
+        print(f"[red]Benchmark failed for {threads} threads:[/red] {e.stderr}")
+        return None
+    finally:
+        os.unlink(script_path)
+        os.unlink(result_file.name)
 
 def create_speedup_table(results, baseline_idx, title, metric):
     table = Table(title=title, box=MARKDOWN)
     table.add_column("Threads", justify="right", style="cyan")
     table.add_column(f"{metric} Time (s)", justify="right", style="green")
     table.add_column(f"{metric} Speedup", justify="right", style="magenta")
-    
+
     baseline = results[baseline_idx]["mean"]
     for result in results:
         speedup = baseline / result["mean"] if result["mean"] > 0 else 0
@@ -129,82 +134,45 @@ def create_speedup_table(results, baseline_idx, title, metric):
             f"{result['mean']:.6f}",
             f"{speedup:.2f}x"
         )
-    
     return table
 
+def main():
+    for test_case in TEST_CASES:
+        print(f"[bold]Running benchmark: {test_case['name']} ({test_case['description']})[/bold]")
 
-for t in test_cases:
-    print(f"Testing {t['name']}...")
-    
-    all_results = {
-        "test_case": t["name"],
-        "description": t["description"],
-        "io_results": [],
-        "compute_results": [],
-        "total_results": []
-    }
-    
-    benchmark_results = []
-    for threads in test_threads:
-        print(f"Testing {t['name']} with {threads} threads in a separate process...")
-        results = run_single_benchmark(t, threads, num_repeats, num_executions)
-        if results:
-            benchmark_results.append((threads, results))
+        all_results = {
+            "test_case": test_case["name"],
+            "description": test_case["description"],
+            "io_results": [],
+            "compute_results": [],
+            "total_results": []
+        }
 
-    benchmark_results.sort(key=lambda x: x[0])
-    
-    for threads, result in benchmark_results:
-        all_results["io_results"].append({
-            "name": f"I/O time ({threads} threads)",
-            "min": result["io"]["min"],
-            "max": result["io"]["max"],
-            "mean": result["io"]["mean"],
-            "threads": threads
-        })
-        
-        all_results["compute_results"].append({
-            "name": f"Compute time ({threads} threads)",
-            "min": result["compute"]["min"],
-            "max": result["compute"]["max"],
-            "mean": result["compute"]["mean"],
-            "threads": threads
-        })
-        
-        all_results["total_results"].append({
-            "name": f"Total time ({threads} threads)",
-            "min": result["total"]["min"],
-            "max": result["total"]["max"],
-            "mean": result["total"]["mean"],
-            "threads": threads
-        })
-    
-    if all_results["io_results"] and all_results["compute_results"] and all_results["total_results"]:
-        io_table = create_speedup_table(
-            all_results["io_results"], 
-            0, 
-            f"I/O Speedup Comparison - {t['name']}", 
-            "I/O"
-        )
-        print(io_table)
-        
-        compute_table = create_speedup_table(
-            all_results["compute_results"], 
-            0,  
-            f"Compute Speedup Comparison - {t['name']}", 
-            "Compute"
-        )
-        print(compute_table)
-        
-        total_table = create_speedup_table(
-            all_results["total_results"], 
-            0,  
-            f"Total Speedup Comparison - {t['name']}", 
-            "Total"
-        )
-        print(total_table)
-        
-        result_file = Path("results") / f"base_content_{t['name']}_separated_speedup.json"
-        with open(result_file, 'w') as f:
+        raw_results = []
+        for threads in THREADS_LIST:
+            print(f"[bold]Running thread number: {threads}[/bold]")
+            result = run_single_benchmark(test_case, threads, NUM_REPEATS)
+            if result:
+                raw_results.append(result)
+
+        raw_results.sort(key=lambda x: x["threads"])
+
+        for result in raw_results:
+            all_results["io_results"].append({**result["io"], "threads": result["threads"]})
+            all_results["compute_results"].append({**result["compute"], "threads": result["threads"]})
+            all_results["total_results"].append({**result["total"], "threads": result["threads"]})
+
+        if all_results["io_results"]:
+            print(create_speedup_table(all_results["io_results"], 0, f"I/O Speedup - {test_case['name']}", "I/O"))
+        if all_results["compute_results"]:
+            print(create_speedup_table(all_results["compute_results"], 0, f"Compute Speedup - {test_case['name']}", "Compute"))
+        if all_results["total_results"]:
+            print(create_speedup_table(all_results["total_results"], 0, f"Total Speedup - {test_case['name']}", "Total"))
+
+        result_path = os.path.join("results", f"base_content_{test_case['name']}_results.json")
+        with open(result_path, "w") as f:
             json.dump(all_results, f, indent=2)
-        
-        print(f"Results saved to {result_file}")
+        print(f"[green]Results saved to:[/green] {result_path}")
+
+if __name__ == "__main__":
+    main()

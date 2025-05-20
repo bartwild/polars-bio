@@ -17,3 +17,7 @@ benchmark/src/results/overlap
 mprofile*dat
 *csv
 tests/data/qc
+small.fastq
+small2.fastq
+small3.fastq
+large.fastq

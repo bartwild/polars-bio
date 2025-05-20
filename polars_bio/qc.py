@@ -87,7 +87,7 @@ def base_content(
     --------
     >>> import polars_bio as pb
     >>> df = pb.read_fastq("example.fastq").collect()
-    >>> base_content_df = pb.qc.base_content_parallel(df, num_threads=8)
+    >>> base_content_df = pb.qc.base_content(df, num_threads=8)
     >>> pb.qc.visualize_base_content(base_content_df)
     """
     from polars_bio.polars_bio import base_content_analysis
@@ -99,8 +99,8 @@ def base_content(
     
     if "sequence" not in df.columns:
         raise ValueError("DataFrame must contain a 'sequence' column")
-    
-    result_df = base_content_analysis(ctx, df, num_threads)
+    ctx.set_option("datafusion.execution.target_partitions", f"{num_threads}")
+    result_df = base_content_analysis(ctx, df)
     
     collected_data = result_df.collect()
     if isinstance(collected_data, pl.DataFrame):
