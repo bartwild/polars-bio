@@ -66,6 +66,73 @@ impl BaseContentAccumulator {
             max_length: 0,
         }
     }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn count_bases_simd(&mut self, seq: &[u8]) {
+        use std::arch::x86_64::*;
+
+        let len = seq.len();
+        let mut i = 0;
+
+        let a_mask = _mm256_set1_epi8(b'A' as i8);
+        let c_mask = _mm256_set1_epi8(b'C' as i8);
+        let g_mask = _mm256_set1_epi8(b'G' as i8);
+        let t_mask = _mm256_set1_epi8(b'T' as i8);
+
+        while i + 32 <= len { // TODO: We can also use more blocks like do chunks for 128
+            let chunk = _mm256_loadu_si256(seq[i..].as_ptr() as *const __m256i);
+
+            let a_cmp = _mm256_cmpeq_epi8(chunk, a_mask);
+            let c_cmp = _mm256_cmpeq_epi8(chunk, c_mask);
+            let g_cmp = _mm256_cmpeq_epi8(chunk, g_mask);
+            let t_cmp = _mm256_cmpeq_epi8(chunk, t_mask);
+
+            // Store comparison results
+            let mut a_bytes = [0u8; 32];
+            let mut c_bytes = [0u8; 32];
+            let mut g_bytes = [0u8; 32];
+            let mut t_bytes = [0u8; 32];
+
+            _mm256_storeu_si256(a_bytes.as_mut_ptr() as *mut __m256i, a_cmp);
+            _mm256_storeu_si256(c_bytes.as_mut_ptr() as *mut __m256i, c_cmp);
+            _mm256_storeu_si256(g_bytes.as_mut_ptr() as *mut __m256i, g_cmp);
+            _mm256_storeu_si256(t_bytes.as_mut_ptr() as *mut __m256i, t_cmp);
+
+            for j in 0..32 {
+                let idx = i + j;
+                if idx < len {
+                    if a_bytes[j] != 0 {
+                        self.a_counts[idx] += 1;
+                        self.total_counts[idx] += 1;
+                    } else if c_bytes[j] != 0 {
+                        self.c_counts[idx] += 1;
+                        self.total_counts[idx] += 1;
+                    } else if g_bytes[j] != 0 {
+                        self.g_counts[idx] += 1;
+                        self.total_counts[idx] += 1;
+                    } else if t_bytes[j] != 0 {
+                        self.t_counts[idx] += 1;
+                        self.total_counts[idx] += 1;
+                    } else {
+                        self.n_counts[idx] += 1;
+                        self.total_counts[idx] += 1;
+                    }
+                }
+            }
+
+            i += 32;
+        }
+
+        for j in i..len {
+            match seq[j] {
+                b'A' => { self.a_counts[j] += 1; self.total_counts[j] += 1; },
+                b'C' => { self.c_counts[j] += 1; self.total_counts[j] += 1; },
+                b'G' => { self.g_counts[j] += 1; self.total_counts[j] += 1; },
+                b'T' => { self.t_counts[j] += 1; self.total_counts[j] += 1; },
+                _ => { self.n_counts[j] += 1; self.total_counts[j] += 1; },
+            }
+        }
+    }
 }
 
 impl Accumulator for BaseContentAccumulator {
@@ -99,13 +166,21 @@ impl Accumulator for BaseContentAccumulator {
             }
 
             let sequence = sequence_array.value(i);
-            for (pos, &byte) in sequence.as_bytes().iter().enumerate() {
-                match byte {
-                    b'A' | b'a' => { self.a_counts[pos] += 1; self.total_counts[pos] += 1; },
-                    b'C' | b'c' => { self.c_counts[pos] += 1; self.total_counts[pos] += 1; },
-                    b'G' | b'g' => { self.g_counts[pos] += 1; self.total_counts[pos] += 1; },
-                    b'T' | b't' => { self.t_counts[pos] += 1; self.total_counts[pos] += 1; },
-                    _ => { self.n_counts[pos] += 1; self.total_counts[pos] += 1; },
+            let bytes = sequence.as_bytes();
+
+            if is_x86_feature_detected!("avx2") && bytes.len() >= 32 {
+                unsafe {
+                    self.count_bases_simd(bytes);
+                }
+            } else {
+                for (pos, &byte) in bytes.iter().enumerate() {
+                    match byte {
+                        b'A' => { self.a_counts[pos] += 1; self.total_counts[pos] += 1; },
+                        b'C' => { self.c_counts[pos] += 1; self.total_counts[pos] += 1; },
+                        b'G' => { self.g_counts[pos] += 1; self.total_counts[pos] += 1; },
+                        b'T' => { self.t_counts[pos] += 1; self.total_counts[pos] += 1; },
+                        _ => { self.n_counts[pos] += 1; self.total_counts[pos] += 1; },
+                    }
                 }
             }
         }
