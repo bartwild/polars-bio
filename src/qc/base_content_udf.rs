@@ -81,9 +81,7 @@ impl Accumulator for BaseContentAccumulator {
             if sequence_array.is_null(i) {
                 continue;
             }
-
-            let sequence = sequence_array.value(i);
-            self.max_length = self.max_length.max(sequence.len());
+            self.max_length = self.max_length.max(sequence_array.value(i).len());
         }
 
         if self.a_counts.len() < self.max_length {
@@ -101,12 +99,12 @@ impl Accumulator for BaseContentAccumulator {
             }
 
             let sequence = sequence_array.value(i);
-            for (pos, base) in sequence.chars().enumerate() {
-                match base.to_ascii_uppercase() {
-                    'A' => { self.a_counts[pos] += 1; self.total_counts[pos] += 1; },
-                    'C' => { self.c_counts[pos] += 1; self.total_counts[pos] += 1; },
-                    'G' => { self.g_counts[pos] += 1; self.total_counts[pos] += 1; },
-                    'T' => { self.t_counts[pos] += 1; self.total_counts[pos] += 1; },
+            for (pos, &byte) in sequence.as_bytes().iter().enumerate() {
+                match byte {
+                    b'A' | b'a' => { self.a_counts[pos] += 1; self.total_counts[pos] += 1; },
+                    b'C' | b'c' => { self.c_counts[pos] += 1; self.total_counts[pos] += 1; },
+                    b'G' | b'g' => { self.g_counts[pos] += 1; self.total_counts[pos] += 1; },
+                    b'T' | b't' => { self.t_counts[pos] += 1; self.total_counts[pos] += 1; },
                     _ => { self.n_counts[pos] += 1; self.total_counts[pos] += 1; },
                 }
             }
@@ -286,11 +284,17 @@ impl Accumulator for BaseContentAccumulator {
 
             let total = self.total_counts[i] as f64;
             if total > 0.0 {
-                a_builder.append_value((self.a_counts[i] as f64) / total * 100.0);
-                c_builder.append_value((self.c_counts[i] as f64) / total * 100.0);
-                g_builder.append_value((self.g_counts[i] as f64) / total * 100.0);
-                t_builder.append_value((self.t_counts[i] as f64) / total * 100.0);
-                n_builder.append_value((self.n_counts[i] as f64) / total * 100.0);
+                let a_pct = (self.a_counts[i] as f64) / total * 100.0;
+                let c_pct = (self.c_counts[i] as f64) / total * 100.0;
+                let g_pct = (self.g_counts[i] as f64) / total * 100.0;
+                let t_pct = (self.t_counts[i] as f64) / total * 100.0;
+                let n_pct = (self.n_counts[i] as f64) / total * 100.0;
+
+                a_builder.append_value(a_pct);
+                c_builder.append_value(c_pct);
+                g_builder.append_value(g_pct);
+                t_builder.append_value(t_pct);
+                n_builder.append_value(n_pct);
             } else {
                 a_builder.append_value(0.0);
                 c_builder.append_value(0.0);
@@ -333,7 +337,13 @@ impl Accumulator for BaseContentAccumulator {
     }
 
     fn size(&self) -> usize {
-        let vec_size = self.max_length * 6 * std::mem::size_of::<u64>();
-        vec_size + std::mem::size_of::<Self>()
+        let vec_capacity = self.a_counts.capacity() +
+                           self.c_counts.capacity() +
+                           self.g_counts.capacity() +
+                           self.t_counts.capacity() +
+                           self.n_counts.capacity() +
+                           self.total_counts.capacity();
+
+        (vec_capacity * std::mem::size_of::<u64>()) + std::mem::size_of::<Self>()
     }
 }
