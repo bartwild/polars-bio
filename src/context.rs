@@ -24,6 +24,10 @@ impl PyBioSessionContext {
     #[new]
     pub fn new(seed: String, catalog_dir: String) -> PyResult<Self> {
         let ctx = create_context().unwrap();
+        let udfs = crate::qc::base_content_udf::create_base_content_udfs();
+        for udf in udfs {
+            ctx.session.register_udf(udf);
+        }
         let session_config: HashMap<String, String> = HashMap::new();
 
         Ok(PyBioSessionContext {

@@ -16,7 +16,7 @@ def visualize_base_content(
 ) -> None:
     """
     Visualize base content percentages across positions.
-    
+
     Parameters
     ----------
     df : Union[pl.DataFrame, pd.DataFrame]
@@ -31,7 +31,7 @@ def visualize_base_content(
         Y-axis label, by default "Percentage"
     save_path : Optional[str], optional
         Path to save the figure, by default None
-        
+
     Returns
     -------
     None
@@ -39,25 +39,25 @@ def visualize_base_content(
     """
     if isinstance(df, pl.DataFrame):
         df = df.to_pandas()
-    
+
     required_cols = ["position", "A", "C", "G", "T", "N"]
     if not all(col in df.columns for col in required_cols):
         raise ValueError(f"DataFrame must contain columns: {required_cols}")
-    
+
     plt.figure(figsize=figsize)
-    
+
     for base in ["A", "C", "G", "T", "N"]:
         plt.plot(df["position"], df[base], label=base)
-    
+
     plt.title(title)
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
     plt.legend()
     plt.grid(True, alpha=0.3)
-    
+
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    
+
     plt.show()
 
 
@@ -68,7 +68,7 @@ def base_content(
 ) -> Union[pl.DataFrame, pd.DataFrame]:
     """
     Calculate base content percentages for each position in sequences using parallel processing.
-    
+
     Parameters
     ----------
     df : Union[pl.DataFrame, pl.LazyFrame, pd.DataFrame]
@@ -77,12 +77,12 @@ def base_content(
         Number of threads to use for parallel processing, by default 4
     output_type : str, optional
         Output type, by default "polars.DataFrame"
-        
+
     Returns
     -------
     Union[pl.DataFrame, pd.DataFrame]
         DataFrame with base content percentages for each position
-    
+
     Examples
     --------
     >>> import polars_bio as pb
@@ -96,12 +96,12 @@ def base_content(
         df = pl.from_pandas(df)
     elif isinstance(df, pl.LazyFrame):
         df = df.collect()
-    
+
     if "sequence" not in df.columns:
         raise ValueError("DataFrame must contain a 'sequence' column")
     ctx.set_option("datafusion.execution.target_partitions", f"{num_threads}")
     result_df = base_content_analysis(ctx, df)
-    
+
     collected_data = result_df.collect()
     if isinstance(collected_data, pl.DataFrame):
         polars_df = collected_data

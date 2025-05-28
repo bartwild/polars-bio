@@ -414,17 +414,17 @@ fn base_content_analysis(
 ) -> PyResult<PyDataFrame> {
     let sequence_col = df.getattr(py, "select")?
         .call1(py, (PyString::new_bound(py, "sequence"),))?;
-    
+
     let arrow_batch = sequence_col.getattr(py, "to_arrow")?
         .call0(py)?;
-    
+
     let sequence_array = arrow_batch
         .getattr(py, "column")?
         .call1(py, (0,))?;
-    
+
     let py_list = sequence_array.getattr(py, "to_pylist")?.call0(py)?;
     let sequence_values: Vec<Option<String>> = py_list.extract(py)?;
-    
+
     let string_array = StringArray::from(sequence_values);
     let target_partitions_opt = py_ctx.get_option("datafusion.execution.target_partitions");
     let num_threads = match target_partitions_opt {
@@ -443,7 +443,7 @@ fn base_content_analysis(
                 return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Error calculating base content: {}", e)));
             },
         };
-        
+
         let df = rt.block_on(async {
             let ctx = &py_ctx.ctx;
             let mem_table = MemTable::try_new(result_batch.schema(), vec![vec![result_batch]]).unwrap();
@@ -451,12 +451,11 @@ fn base_content_analysis(
             ctx.session.register_table(table_name.clone(), Arc::new(mem_table)).unwrap();
             ctx.session.table(table_name).await.unwrap()
         });
-        
-        
+
+
         Ok(PyDataFrame::new(df))
     })
 }
-
 
 #[pymodule]
 fn polars_bio(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
