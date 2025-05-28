@@ -8,6 +8,8 @@ use log::debug;
 use pyo3::{pyclass, pymethods, PyResult};
 use sequila_core::session_context::SequilaConfig;
 
+use crate::qc::base_content_udf::create_base_content_udaf;
+
 #[pyclass(name = "BioSessionContext")]
 // #[derive(Clone)]
 pub struct PyBioSessionContext {
@@ -24,10 +26,7 @@ impl PyBioSessionContext {
     #[new]
     pub fn new(seed: String, catalog_dir: String) -> PyResult<Self> {
         let ctx = create_context().unwrap();
-        let udfs = crate::qc::base_content_udf::create_base_content_udfs();
-        for udf in udfs {
-            ctx.session.register_udf(udf);
-        }
+        ctx.session.register_udaf(create_base_content_udaf());
         let session_config: HashMap<String, String> = HashMap::new();
 
         Ok(PyBioSessionContext {
