@@ -4,6 +4,7 @@ target
 venv
 .venv
 *.so
+*.fastq
 *.dll
 *.pyd
 
@@ -16,3 +17,11 @@ benchmark/src/results
 benchmark/src/results/overlap
 mprofile*dat
 *csv
+tests/data/qc
+small.fastq
+small2.fastq
+small3.fastq
+large.fastq
+ERR194147.fastq.gz
+dupa.html
+outt/fastqc_data.txt

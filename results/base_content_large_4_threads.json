@@ -1,0 +1,1 @@
+{"test_case": "large", "description": "Large FASTQ file (~1GB)", "threads": 4, "io_result": {"name": "I/O time (4 threads)", "time": 1.0442216396331787, "threads": 4}, "compute_result": null, "total_result": null}
