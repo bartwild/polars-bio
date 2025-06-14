@@ -4,6 +4,7 @@ import pandas as pd
 from _expected import DATA_DIR
 import pytest
 import matplotlib.pyplot as plt
+import random
 
 
 class TestBaseContent:
@@ -54,13 +55,6 @@ class TestBaseContent:
     def test_invalid_input_type(self):
         with pytest.raises(ValueError, match="DataFrame must contain a 'sequence' column"):
             pb.qc.base_content(pl.DataFrame({"id": [1, 2], "name": ["a", "b"]}))
-
-import pytest
-import random
-import string
-import polars_bio as pb
-import polars as pl
-import pandas as pd
 
 
 def generate_sequences(n: int, length: int, bases="ACGTN") -> list[str]:
