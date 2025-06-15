@@ -24,6 +24,11 @@ class TestBaseContent:
     def test_base_content_pandas(self):
         pdf = self.df.to_pandas()
         result = pb.qc.base_content(pdf, output_type="pandas.DataFrame")
+
+        if "base" in result.columns and isinstance(result["base"].iloc[0], dict):
+            base_df = pd.json_normalize(result["base"])
+            result = pd.concat([result.drop(columns=["base"]), base_df], axis=1)
+
         assert isinstance(result, pd.DataFrame)
         assert set(["position", "A", "C", "G", "T", "N"]).issubset(result.columns)
 
@@ -96,7 +101,6 @@ class TestSyntheticSequences:
         df = pl.DataFrame({"sequence": ["AXGT" * 10, "CC33TTAA" * 5]})
         result = pb.qc.base_content(df)
         assert isinstance(result, pl.DataFrame)
-        # Only valid bases should be tracked
         assert all(col in result.columns for col in ["A", "C", "G", "T", "N"])
 
     def test_large_scale(self):
@@ -104,7 +108,52 @@ class TestSyntheticSequences:
         df = pl.DataFrame({"sequence": generate_sequences(10_000, 100)})
         result = pb.qc.base_content(df)
         assert isinstance(result, pl.DataFrame)
-        assert result.shape[0] == 100  # One row per position
+        assert result.shape[0] == 100
         for row in result.iter_rows(named=True):
             total = row["A"] + row["C"] + row["G"] + row["T"] + row["N"]
             assert abs(total - 100.0) < 1e-6
+
+
+class TestBaseContentSQL:
+    @classmethod
+    def setup_class(cls):
+        fastq_file = f"{DATA_DIR}/io/fastq/test.fastq"
+        pb.read_fastq(fastq_file).collect()
+        cls.df = pb.read_fastq(fastq_file).collect()
+        pb.ctx.set_option("datafusion.execution.target_partitions", "2")
+
+    def test_base_content_sql_result_shape_and_columns(self):
+        result = pb.sql("SELECT base_content(sequence) AS base FROM test").collect().unnest("base")
+        assert isinstance(result, pl.DataFrame)
+        assert set(["position", "A", "C", "G", "T", "N"]).issubset(result.columns)
+
+    def test_base_content_sql_sum_to_100(self):
+        result = pb.sql("SELECT base_content(sequence) AS base FROM test").collect().unnest("base")
+        for row in result.iter_rows(named=True):
+            total = row["A"] + row["C"] + row["G"] + row["T"] + row["N"]
+            assert abs(total - 100.0) < 1e-10, f"Base % sum != 100: {total}"
+
+    def test_sql_query_on_subset(self):
+        result = pb.sql("SELECT base_content(sequence) AS base FROM test WHERE LENGTH(sequence) >= 2").collect().unnest("base")
+        assert result.shape[0] > 0
+        assert set(["position", "A", "C", "G", "T", "N"]).issubset(result.columns)
+
+    def test_sql_vs_api_equivalence(self):
+        sql_result = pb.sql("SELECT base_content(sequence) AS base FROM test").collect().unnest("base")
+        api_result = pb.qc.base_content(self.df)
+
+        assert sql_result.shape == api_result.shape
+        assert sql_result.columns == api_result.columns
+        for col in ["A", "C", "G", "T", "N", "position"]:
+            assert sql_result[col].equals(api_result[col]), f"Mismatch in column: {col}"
+
+    def test_sql_with_alias_and_filter(self):
+        query = """
+            SELECT base_content(sequence) AS base_content_result
+            FROM test
+            WHERE LENGTH(sequence) >= 2
+        """
+        result = pb.sql(query).collect().unnest("base_content_result")
+        assert result.shape[0] > 0
+        assert "A" in result.columns
+        assert result["position"].max() >= 0
