@@ -63,7 +63,6 @@ def visualize_base_content(
 
 def base_content(
     df: Union[pl.DataFrame, pl.LazyFrame, pd.DataFrame],
-    num_threads: int = 4,
     output_type: str = "polars.DataFrame"
 ) -> Union[pl.DataFrame, pd.DataFrame]:
     """
@@ -73,8 +72,6 @@ def base_content(
     ----------
     df : Union[pl.DataFrame, pl.LazyFrame, pd.DataFrame]
         DataFrame containing a 'sequence' column with DNA/RNA sequences
-    num_threads : int, optional
-        Number of threads to use for parallel processing, by default 4
     output_type : str, optional
         Output type, by default "polars.DataFrame"
 
@@ -87,7 +84,7 @@ def base_content(
     --------
     >>> import polars_bio as pb
     >>> df = pb.read_fastq("example.fastq").collect()
-    >>> base_content_df = pb.qc.base_content(df, num_threads=8)
+    >>> base_content_df = pb.qc.base_content(df)
     >>> pb.qc.visualize_base_content(base_content_df)
     """
     from polars_bio.polars_bio import base_content_analysis
@@ -99,7 +96,6 @@ def base_content(
 
     if "sequence" not in df.columns:
         raise ValueError("DataFrame must contain a 'sequence' column")
-    ctx.set_option("datafusion.execution.target_partitions", f"{num_threads}")
     result_df = base_content_analysis(ctx, df)
 
     collected_data = result_df.collect()
